@@ -1,0 +1,13 @@
+PyQt6
+mutagen
+requests
+aiogram
+beautifulsoup4
+textual
+rich
+psutil
+numpy
+markdown
+python-pptx
+python-docx
+gkeepapi
