@@ -41,7 +41,8 @@ from rich.text import Text
 
 from indexer import (
     scan, add_tag, remove_tag, get_by_tag, cleanup_db, 
-    add_tags_bulk, remove_tags_bulk, remove_tags_by_prefix, move_file_with_tags
+    add_tags_bulk, remove_tags_bulk, remove_tags_by_prefix, move_file_with_tags,
+    find_smart_folder
 )
 from db import init_db
 from ns_config import COLORS, BG_RGB
@@ -313,7 +314,7 @@ Input:focus {{ border: round {COLORS['pink']}; }}
             self.smart_folders[str(path)] = tag
             self.dir_tree.refresh()
         elif self.input_mode == "tagging":
-            target_folder = next((p for p, t in self.smart_folders.items() if t.lower() in tag.lower()), None)
+            target_folder = find_smart_folder(tag)
             
             if node.allow_expand:
                 self._bg(self._apply_tag_recursive, path, tag, "add")
@@ -454,13 +455,35 @@ def _acquire_single_instance_lock():
     """Не даём запустить второй экземпляр — именно параллельные процессы
     (старый ещё сканирует ~/ и держит запись в БД) давали 'database is locked'."""
     import fcntl
-    lock_file = open(Path.home() / ".neurosync.lock", "w")
+    lock_path = Path.home() / ".neurosync.lock"
+    lock_file = open(lock_path, "a+")
     try:
         fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
-        print("NeuroSync уже запущен (другой процесс держит БД).\n"
-              "Завершите его:  pkill -f neurosync/main.py   и запустите ns снова.")
+        pid = ""
+        try:
+            lock_file.seek(0)
+            pid = lock_file.read().strip()
+        except OSError:
+            pass
+        state = ""
+        if pid.isdigit():
+            try:
+                with open(f"/proc/{pid}/stat") as f:
+                    st = f.read().rsplit(")", 1)[1].split()[0]
+                state = " (приостановлен через Ctrl+Z — вернуть: fg)" if st == "T" else ""
+            except OSError:
+                pass
+        print("NeuroSync уже запущен (другой процесс держит БД).")
+        if pid.isdigit():
+            print(f"Это процесс PID {pid}{state}. Завершить:  kill {pid}   (если не помогло: kill -9 {pid})")
+        else:
+            print("Найти процесс:  pgrep -af main.py")
         sys.exit(1)
+    lock_file.seek(0)
+    lock_file.truncate()
+    lock_file.write(str(os.getpid()))
+    lock_file.flush()
     return lock_file  # держим ссылку, пока жив процесс
 
 

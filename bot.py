@@ -18,7 +18,7 @@ from aiogram.types import (
 )
 
 # Импортируем твои функции (добавили move_file_with_tags)
-from indexer import add_tag, get_by_tag, get_by_name, get_recent_files, remove_tag, move_file_with_tags
+from indexer import add_tag, get_by_tag, get_by_name, get_recent_files, remove_tag, move_file_with_tags, find_smart_folder
 from db import init_db, get_conn
 import ns_config
 from aiogram import BaseMiddleware
@@ -48,6 +48,18 @@ class OwnerOnlyMiddleware(BaseMiddleware):
 
 dp.message.outer_middleware(OwnerOnlyMiddleware())
 dp.callback_query.outer_middleware(OwnerOnlyMiddleware())
+
+# --- СТИЛЬ ВЫВОДА (монохромные символы, без цветных эмодзи и без линий) ---
+# ◇ заголовок   ▾ раздел   ⟡ пункт   ▸ подпункт   ✧ акцент
+
+def h1(title: str) -> str:
+    return f"◇ **{title}**"
+
+def h2(title: str) -> str:
+    return f"▾ **{title}**"
+
+def row(label: str, value, icon: str = "⟡") -> str:
+    return f"{icon} {label}: `{value}`"
 
 # --- ЛОГИКА МЕТРО (Tetrogame Engine) ---
 
@@ -93,7 +105,7 @@ def render_status(info_text):
     card_type = type_match.group(1).strip() if type_match else "Проездной билет"
 
     if not dates:
-        return f"**Данные не распознаны**\n\n`{info_text}`"
+        return f"{h2('Метро')}\n⟡ Данные не распознаны\n▸ `{info_text}`"
 
     # Обычно первая дата — окончание, вторая — последняя операция
     end_date_str = dates[0]
@@ -119,27 +131,20 @@ def render_status(info_text):
         bar = '▰' * filled + '▱' * (bar_length - filled)
         
         # Формируем итоговое сообщение
-        status_icon = "" if days_left > 3 else ""
-        if days_left <= 0: status_icon = ""
-
         response = [
-            f"🎫 **{card_type}**",
-            f"**Годен до:** `{end_date.strftime('%d.%m.%Y')}`",
-            f"**Осталось:** `{max(0, days_left)} дн. {hours_left} ч.`",
-            f"**Последняя поездка:** `{last_op_str}`",
-            f"{status_icon} **Статус:** `{bar} {int(percent * 100)}%`",
+            f"{h2('Метро')} ✧ {card_type}",
+            row("Годен до", end_date.strftime('%d.%m.%Y')),
+            row("Осталось", f"{max(0, days_left)} дн. {hours_left} ч."),
+            row("Поездка", last_op_str),
+            row("Остаток", f"{bar} {int(percent * 100)}%"),
         ]
         
         return "\n".join(response)
 
     except Exception as e:
         # Если что-то пошло не так в парсинге, выводим аккуратный сырой текст
-        return (
-            f"💳 **Данные карты:**\n"
-            f"━━━━━━━━━━━━━━\n"
-            f"{info_text.replace(', ', '\n')}\n"
-            f"━━━━━━━━━━━━━━"
-        )
+        lines = "\n".join(f"▸ {part}" for part in info_text.split(", "))
+        return f"{h2('Метро')} ✧ данные карты\n{lines}"
 
 # --- СОСТОЯНИЯ (FSM) ---
 class FileStates(StatesGroup):
@@ -202,9 +207,7 @@ def home_kb():
 # --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
 
 async def check_user(message: Message):
-    if not message.from_user.username or message.from_user.username.lower() != "so_me_bo_dy":
-        await message.answer("Доступ запрещен. Это приватный бот.")
-        return False
+    # Доступ уже ограничен OwnerOnlyMiddleware (по Telegram ID).
     return True
 
 def get_smart_folders() -> dict:
@@ -226,20 +229,20 @@ def get_smart_folders() -> dict:
 
 async def show_file_list(message: Message, state: FSMContext, results: list, title: str):
     if not results:
-        await message.answer(f"{title}: Ничего не найдено.", reply_markup=main_kb())
+        await message.answer(f"{h1(title)}\n⟡ ничего не найдено", reply_markup=main_kb())
         await state.clear()
         return
 
-    msg_lines = [f"**{title}** (найдено {len(results)}):", ""]
+    msg_lines = [f"{h1(title)}", f"✧ найдено: {len(results)}", ""]
     paths_dict = {}
     
     for i, res in enumerate(results[:15], start=1):
         path_str = res[0]
         file_name = Path(path_str).name
         paths_dict[str(i)] = path_str
-        msg_lines.append(f"{i}. `{file_name}`")
+        msg_lines.append(f"⟡ {i} · `{file_name}`")
 
-    msg_lines.append("\n**Введите номер файла**, чтобы выкачать его:")
+    msg_lines.append("\n▸ отправьте номер файла, чтобы скачать его")
     
     await state.update_data(found_paths=paths_dict)
     await state.set_state(FileStates.waiting_for_select)
@@ -251,7 +254,7 @@ async def show_file_list(message: Message, state: FSMContext, results: list, tit
 async def cancel_any_action(message: Message, state: FSMContext):
     if not await check_user(message): return
     await state.clear()
-    await message.answer("Действие отменено. Вы в главном меню.", reply_markup=main_kb())
+    await message.answer(f"{h1('NeuroSync')}\n▸ главное меню", reply_markup=main_kb())
 
 # --- ОБРАБОТЧИКИ КОМАНД ---
 
@@ -261,7 +264,7 @@ async def start_cmd(message: Message):
     init_db()
     DOWNLOAD_BASE_PATH.mkdir(parents=True, exist_ok=True)
     NOTES_DIR.mkdir(parents=True, exist_ok=True)
-    await message.answer("Система NeuroSync готова. Что делаем?", reply_markup=main_kb())
+    await message.answer(f"{h1('NeuroSync')}\n✧ система готова", reply_markup=main_kb())
 
 @dp.message(F.text == "Статус")
 async def status_cmd(message: Message):
@@ -272,20 +275,16 @@ async def status_cmd(message: Message):
     notes_count = len(list(NOTES_DIR.glob('*.md')))
     
     # 2. Метро статус (Твой код)
-    await message.answer("🛰 Синхронизация с сервером метро...")
+    await message.answer("✧ Синхронизация с метро…")
     metro_raw = await asyncio.to_thread(get_metro_info_final, MY_METRO_CARD)
     metro_styled = render_status(metro_raw)
     
     status_text = (
-        f"💻 **NeuroSync OS Status**\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"💾 Свободно: `{free // (2**30)} GB`\n"
-        f"📝 Заметок: `{notes_count} шт.`\n\n"
-        f"━━━━━━━━━━━━━━━━━━━━\n"
-        f"{metro_styled}\n"
-        f"© made by Tetrogame\n"
-        f"━━━━━━━━━━━━━━━━━━━━"
-
+        f"{h1('NeuroSync OS Status')}\n\n"
+        f"{h2('Система')}\n"
+        f"{row('Свободно', f'{free // (2**30)} GB')}\n"
+        f"{row('Заметок', f'{notes_count} шт.')}\n\n"
+        f"{metro_styled}"
     )
     await message.answer(status_text, parse_mode="Markdown")
 
@@ -295,7 +294,7 @@ async def send_fm_view(event: Message | CallbackQuery, path: Path, state: FSMCon
     try:
         items = list(path.iterdir())
     except PermissionError:
-        text = f"Нет доступа к директории:\n`{path}`"
+        text = f"{h1('Проводник')}\n⟡ Нет доступа: `{path}`"
         if isinstance(event, Message):
             await event.answer(text)
         else:
@@ -311,19 +310,19 @@ async def send_fm_view(event: Message | CallbackQuery, path: Path, state: FSMCon
     kb_buttons = []
     
     if path.parent != path:
-        kb_buttons.append([InlineKeyboardButton(text="[ На уровень выше ]", callback_data="fm_up")])
+        kb_buttons.append([InlineKeyboardButton(text="◂ на уровень выше", callback_data="fm_up")])
         
     for i, item in enumerate(display_items):
         map_dict[str(i)] = item.name
-        prefix = "[Папка]" if item.is_dir() else "[Файл]"
-        kb_buttons.append([InlineKeyboardButton(text=f"{prefix} {item.name}", callback_data=f"fm_cd_{i}")])
+        label = f"▸ {item.name}/" if item.is_dir() else f"⟡ {item.name}"
+        kb_buttons.append([InlineKeyboardButton(text=label, callback_data=f"fm_cd_{i}")])
         
     await state.update_data(fm_map=map_dict)
     markup = InlineKeyboardMarkup(inline_keyboard=kb_buttons)
     
-    text = f"**Текущая директория:**\n`{path}`"
+    text = f"{h1('Проводник')}\n▸ `{path}`"
     if len(folders) + len(files) > 90:
-        text += "\n*(Показаны первые 90 элементов)*"
+        text += "\n✧ показаны первые 90 элементов"
         
     if isinstance(event, Message):
         await event.answer(text, reply_markup=markup, parse_mode="Markdown")
@@ -336,7 +335,7 @@ async def start_explorer(message: Message, state: FSMContext):
     start_path = Path.home()
     await state.set_state(ExplorerStates.browsing)
     await state.update_data(current_path=str(start_path))
-    await message.answer("Файловый менеджер активирован. Используйте кнопки ниже для навигации.", reply_markup=home_kb())
+    await message.answer(f"{h1('Проводник')}\n✧ навигация кнопками ниже", reply_markup=home_kb())
     await send_fm_view(message, start_path, state)
 
 @dp.callback_query(ExplorerStates.browsing, F.data.startswith("fm_"))
@@ -385,13 +384,13 @@ async def process_explorer_callback(callback: CallbackQuery, state: FSMContext):
 async def start_upload(message: Message, state: FSMContext):
     if not await check_user(message): return
     await state.set_state(FileStates.waiting_for_upload_tag)
-    await message.answer("Введите тег для этого файла:", reply_markup=home_kb())
+    await message.answer(f"{h1('Загрузка')}\n▸ введите тег для файла", reply_markup=home_kb())
 
 @dp.message(FileStates.waiting_for_upload_tag)
 async def process_upload_tag(message: Message, state: FSMContext):
     await state.update_data(tag=message.text.strip())
     await state.set_state(FileStates.waiting_for_file)
-    await message.answer(f"Жду файл (документ или фото) для тега '{message.text}'...", reply_markup=home_kb())
+    await message.answer(f"{h1('Загрузка')}\n▸ тег: `{message.text.strip()}`\n⟡ жду документ или фото", reply_markup=home_kb())
 
 @dp.message(FileStates.waiting_for_file, F.document | F.photo)
 async def handle_file_upload(message: Message, state: FSMContext):
@@ -412,8 +411,7 @@ async def handle_file_upload(message: Message, state: FSMContext):
     add_tag(str(temp_path), tag)
     
     # УМНАЯ СОРТИРОВКА: ищем подходящую умную папку
-    smart_folders = get_smart_folders()
-    target_folder = next((p for p, t in smart_folders.items() if t.lower() in tag.lower()), None)
+    target_folder = find_smart_folder(tag)
     
     if target_folder:
         # Переносим файл встроенной логикой твоего движка indexer
@@ -421,14 +419,15 @@ async def handle_file_upload(message: Message, state: FSMContext):
         if final_path:
             folder_name = Path(target_folder).name
             await message.answer(
-                f"✨ Обнаружена умная папка!\n"
-                f"Файл успешно перемещен в `.../{folder_name}/` и переиндексирован.", 
+                f"{h1('Файл принят')}\n"
+                f"✧ умная папка: `.../{folder_name}/`\n"
+                f"⟡ перемещён и переиндексирован", 
                 reply_markup=main_kb()
             )
         else:
-            await message.answer("Файл проиндексирован, но возникла ошибка при перемещении в умную папку.", reply_markup=main_kb())
+            await message.answer(f"{h1('Файл принят')}\n⟡ проиндексирован, но не удалось переместить в умную папку", reply_markup=main_kb())
     else:
-        await message.answer("Файл принят, проиндексирован и сохранен в загрузки (умных папок под этот тег не найдено).", reply_markup=main_kb())
+        await message.answer(f"{h1('Файл принят')}\n⟡ проиндексирован, лежит в загрузках\n▸ умных папок под этот тег нет", reply_markup=main_kb())
         
     await state.clear()
 
@@ -438,7 +437,7 @@ async def handle_file_upload(message: Message, state: FSMContext):
 async def start_tag_search(message: Message, state: FSMContext):
     if not await check_user(message): return
     await state.set_state(FileStates.waiting_for_search_tag)
-    await message.answer("Какой тег ищем?", reply_markup=home_kb())
+    await message.answer(f"{h1('Поиск по тегу')}\n▸ какой тег ищем?", reply_markup=home_kb())
 
 @dp.message(FileStates.waiting_for_search_tag)
 async def search_tag_handler(message: Message, state: FSMContext):
@@ -449,7 +448,7 @@ async def search_tag_handler(message: Message, state: FSMContext):
 async def start_name_search(message: Message, state: FSMContext):
     if not await check_user(message): return
     await state.set_state(FileStates.waiting_for_search_name)
-    await message.answer("Введите часть названия файла:", reply_markup=home_kb())
+    await message.answer(f"{h1('Поиск по имени')}\n▸ введите часть названия", reply_markup=home_kb())
 
 @dp.message(FileStates.waiting_for_search_name)
 async def search_name_handler(message: Message, state: FSMContext):
@@ -471,17 +470,17 @@ async def process_file_selection(message: Message, state: FSMContext):
     if choice in paths:
         file_path_str = paths[choice]
         if os.path.exists(file_path_str):
-            await message.answer("Отправляю файл...")
+            await message.answer("✧ отправляю…")
             try:
                 await message.answer_document(FSInputFile(file_path_str))
                 await state.clear()
-                await message.answer("Готово.", reply_markup=main_kb())
+                await message.answer("⟡ готово", reply_markup=main_kb())
             except Exception as e:
                 await message.answer(f"Ошибка при отправке: {e}")
         else:
-            await message.answer("Файл не найден физически на диске.")
+            await message.answer("⟡ файл не найден на диске")
     else:
-        await message.answer("Неверный номер. Введите индекс из списка выше.")
+        await message.answer("⟡ неверный номер, выберите из списка")
 
 # --- МОДУЛЬ РАБОТЫ С ЗАМЕТКАМИ ---
 
@@ -489,7 +488,7 @@ async def process_file_selection(message: Message, state: FSMContext):
 async def notes_menu(message: Message, state: FSMContext):
     if not await check_user(message): return
     await state.set_state(NoteStates.waiting_for_menu_choice)
-    await message.answer("**Панель заметок NeuroNotes**\nВыберите действие на клавиатуре:", reply_markup=notes_menu_kb(), parse_mode="Markdown")
+    await message.answer(f"{h1('NeuroNotes')}\n▸ выберите действие на клавиатуре", reply_markup=notes_menu_kb(), parse_mode="Markdown")
 
 @dp.message(NoteStates.waiting_for_menu_choice)
 async def process_notes_menu(message: Message, state: FSMContext):
@@ -497,22 +496,22 @@ async def process_notes_menu(message: Message, state: FSMContext):
     
     if choice == "Создать заметку":
         await state.set_state(NoteStates.waiting_for_title)
-        await message.answer("Введите название для новой заметки (имя файла):", reply_markup=home_kb())
+        await message.answer(f"{h1('Новая заметка')}\n▸ введите название (имя файла)", reply_markup=home_kb())
         
     elif choice == "Мои заметки":
         files = sorted(NOTES_DIR.glob("*.md"), key=os.path.getmtime, reverse=True)
         if not files:
-            await message.answer("В папке NeuroNotes пока нет заметок.", reply_markup=notes_menu_kb())
+            await message.answer(f"{h1('Заметки')}\n⟡ пока пусто", reply_markup=notes_menu_kb())
             return
             
-        msg_lines = ["**Список заметок в системе:**", ""]
+        msg_lines = [h1("Заметки"), ""]
         notes_dict = {}
         
         for i, f in enumerate(files[:20], start=1):
             notes_dict[str(i)] = str(f)
-            msg_lines.append(f"{i}. `{f.name}`")
+            msg_lines.append(f"⟡ {i} · `{f.name}`")
             
-        msg_lines.append("\n**Введите номер заметки** из текстового списка выше:")
+        msg_lines.append("\n▸ отправьте номер заметки")
         
         await state.update_data(found_notes=notes_dict)
         await state.set_state(NoteStates.waiting_for_select)
@@ -526,9 +525,9 @@ async def note_create_content(message: Message, state: FSMContext):
     await state.update_data(note_title=title, accumulated_text=[])
     await state.set_state(NoteStates.accumulating_content)
     await message.answer(
-        f"Заметка **{title}** инициализирована.\n"
-        "Отправляйте любые текстовые сообщения подряд. Я буду дописывать их в буфер.\n"
-        "Чтобы завершить сбор и сохранить, нажмите кнопку Домой.",
+        f"{h1(title)}\n"
+        "⟡ отправляйте сообщения подряд, я допишу их в заметку\n"
+        "▸ чтобы сохранить, нажмите «Домой»",
         reply_markup=home_kb(),
         parse_mode="Markdown"
     )
@@ -546,7 +545,7 @@ async def note_accumulate(message: Message, state: FSMContext):
         lines = current_lines[:-1]
         
         if not lines:
-            await message.answer("Буфер пуст. Заметка не сохранена.", reply_markup=main_kb())
+            await message.answer("⟡ буфер пуст, заметка не сохранена", reply_markup=main_kb())
             await state.clear()
             return
             
@@ -557,7 +556,7 @@ async def note_accumulate(message: Message, state: FSMContext):
         file_path.write_text(full_content, encoding='utf-8')
         
         add_tag(str(file_path), "note")
-        await message.answer(f"Заметка `{title}.md` успешно сохранена!", reply_markup=main_kb(), parse_mode="Markdown")
+        await message.answer(f"✧ заметка сохранена: `{title}.md`", reply_markup=main_kb(), parse_mode="Markdown")
         await state.clear()
 
 @dp.message(NoteStates.waiting_for_select)
@@ -572,12 +571,12 @@ async def process_note_selection(message: Message, state: FSMContext):
         
         await state.set_state(NoteStates.waiting_for_action)
         await message.answer(
-            f"**Управление заметкой:** `{Path(file_path_str).name}`\nВыберите действие на клавиатуре:",
+            f"{h1('Заметка')}\n▸ `{Path(file_path_str).name}`\n⟡ выберите действие на клавиатуре",
             reply_markup=note_actions_kb(),
             parse_mode="Markdown"
         )
     else:
-        await message.answer("Неверный номер заметки. Введите индекс из списка.")
+        await message.answer("⟡ неверный номер, выберите из списка")
 
 @dp.message(NoteStates.waiting_for_action)
 async def process_note_action(message: Message, state: FSMContext):
@@ -586,7 +585,7 @@ async def process_note_action(message: Message, state: FSMContext):
     file_path = data.get("selected_note_path")
     
     if not file_path or not os.path.exists(file_path):
-        await message.answer("Ошибка: файл больше не существует на сервере.", reply_markup=notes_menu_kb())
+        await message.answer("⟡ файл больше не существует", reply_markup=notes_menu_kb())
         await state.set_state(NoteStates.waiting_for_menu_choice)
         return
         
@@ -599,23 +598,21 @@ async def process_note_action(message: Message, state: FSMContext):
         safe_preview = preview.replace("```", "'''")
 
         response_text = (
-            f"**Содержимое `{Path(file_path).name}`:**\n"
-            f"━━━━━━━━━━━━━━\n"
+            f"{h1(Path(file_path).name)}\n\n"
             f"```\n"
             f"{safe_preview}\n"
-            f"```\n"
-            f"━━━━━━━━━━━━━━"
+            f"```"
         )
         
         if is_truncated:
-            response_text += f"\n**Текст обрезан!** Используйте кнопку **'Скачать'**."
+            response_text += "\n✧ текст обрезан, нажмите «Скачать»"
 
         try:
             await message.answer(response_text, reply_markup=note_actions_kb(), parse_mode="Markdown")
         except Exception as e:
             import html
             safe_html = html.escape(preview)
-            html_text = f"<b>Содержимое {Path(file_path).name}:</b>\n━━━━━━━━━━━━━━\n<pre>{safe_html}</pre>\n━━━━━━━━━━━━━━"
+            html_text = f"◇ <b>{html.escape(Path(file_path).name)}</b>\n\n<pre>{safe_html}</pre>"
             await message.answer(html_text, reply_markup=note_actions_kb(), parse_mode="HTML")
         
     elif choice == "Править":
@@ -623,8 +620,8 @@ async def process_note_action(message: Message, state: FSMContext):
         # ФИКС ТУТ: Добавили encoding='utf-8'
         current_content = Path(file_path).read_text(encoding='utf-8')
         await message.answer(
-            f"Текущий текст:\n`{current_content}`\n\n"
-            "Отправьте ОДНО новое сообщение. Его текст полностью перезапишет старый:",
+            f"{h1('Правка')}\n`{current_content}`\n\n"
+            "▸ отправьте ОДНО сообщение, оно полностью заменит старый текст",
             reply_markup=home_kb(),
             parse_mode="Markdown"
         )
@@ -634,9 +631,9 @@ async def process_note_action(message: Message, state: FSMContext):
             if os.path.exists(file_path):
                 os.unlink(file_path)
             remove_tag(file_path)
-            await message.answer(f"Заметка `{Path(file_path).name}` полностью удалена из NeuroNotes и базы.", reply_markup=notes_menu_kb(), parse_mode="Markdown")
+            await message.answer(f"✧ удалено: `{Path(file_path).name}`", reply_markup=notes_menu_kb(), parse_mode="Markdown")
         except Exception as e:
-            await message.answer(f"Не удалось удалить файл: {e}", reply_markup=notes_menu_kb())
+            await message.answer(f"⟡ не удалось удалить: {e}", reply_markup=notes_menu_kb())
         await state.set_state(NoteStates.waiting_for_menu_choice)
         
     elif choice == "Скачать":
@@ -644,7 +641,7 @@ async def process_note_action(message: Message, state: FSMContext):
         
     elif choice == "Назад к заметкам":
         await state.set_state(NoteStates.waiting_for_menu_choice)
-        await message.answer("Возврат в меню заметок.", reply_markup=notes_menu_kb())
+        await message.answer(f"{h1('NeuroNotes')}\n▸ меню заметок", reply_markup=notes_menu_kb())
     else:
         await message.answer("Пожалуйста, используйте кнопки меню.")
 
@@ -655,7 +652,7 @@ async def note_edit_save(message: Message, state: FSMContext):
     
     # ФИКС ТУТ: Добавили encoding='utf-8'
     Path(file_path_str).write_text(message.text.strip(), encoding='utf-8')
-    await message.answer(f"Изменения в файл `{Path(file_path_str).name}` внесены!", reply_markup=note_actions_kb(), parse_mode="Markdown")
+    await message.answer(f"✧ сохранено: `{Path(file_path_str).name}`", reply_markup=note_actions_kb(), parse_mode="Markdown")
     await state.set_state(NoteStates.waiting_for_action)
 
 # --- СТАРТ БОТА ---
@@ -681,5 +678,25 @@ async def main():
     print("NeuroSync CLI-Style Bot успешно запущен и слушает потоки!")
     await dp.start_polling(bot)
 
+def _acquire_bot_lock():
+    """Второй экземпляр бота с тем же токеном = конфликт getUpdates и 'молчащий' бот."""
+    import fcntl
+    lock_file = open(Path.home() / ".neurosync_bot.lock", "w")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        try:
+            holder = Path.home().joinpath(".neurosync_bot.lock").read_text().strip()
+        except OSError:
+            holder = "?"
+        print(f"Бот уже запущен (PID {holder}), второй экземпляр не нужен. "
+              f"Остановить: kill {holder}")
+        raise SystemExit(0)
+    lock_file.write(str(os.getpid()))
+    lock_file.flush()
+    return lock_file
+
+
 if __name__ == "__main__":
+    _bot_lock = _acquire_bot_lock()
     asyncio.run(main())
