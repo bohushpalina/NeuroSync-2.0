@@ -20,6 +20,11 @@ from aiogram.types import (
 # Импортируем твои функции (добавили move_file_with_tags)
 from indexer import add_tag, get_by_tag, get_by_name, get_recent_files, remove_tag, move_file_with_tags, find_smart_folder
 from db import init_db, get_conn
+from game_status import (
+    get_game_status, get_achievements, get_week_report,
+    get_week_achievements, MAX_LEVEL,
+)
+from aiogram.exceptions import TelegramBadRequest
 import ns_config
 from aiogram import BaseMiddleware
 
@@ -173,7 +178,7 @@ def main_kb():
             [KeyboardButton(text="Загрузить"), KeyboardButton(text="Проводник")],
             [KeyboardButton(text="Поиск по тегу"), KeyboardButton(text="Поиск по имени")],
             [KeyboardButton(text="Свежее"), KeyboardButton(text="Заметки")],
-            [KeyboardButton(text="Статус")]
+            [KeyboardButton(text="Статус"), KeyboardButton(text="Игра")]
         ],
         resize_keyboard=True
     )
@@ -288,6 +293,175 @@ async def status_cmd(message: Message):
     )
     await message.answer(status_text, parse_mode="Markdown")
 
+# --- СТАТУС ИГРЫ (виджет NeuroGame) ---
+
+def bar(value, maximum=100, length=12):
+    value = max(0.0, min(float(value), float(maximum)))
+    filled = int(length * value / maximum) if maximum else 0
+    return "▰" * filled + "▱" * (length - filled)
+
+def render_game(st: dict) -> str:
+    lvl = st["level"]
+    if st["xp_need"]:
+        xp_val = f"{bar(min(st['xp'], st['xp_need']), st['xp_need'])} {st['xp']:.0f}/{st['xp_need']}"
+    else:
+        xp_val = f"{bar(1, 1)} MAX"
+    hp_val = f"{bar(st['hp'])} {st['hp']:.0f}/100"
+    mom_val = f"{bar(st['momentum'], 100)} {st['momentum']:.0f}% {st['momentum_state']}"
+
+    hours, minutes = divmod(int(st["today_minutes"]), 60)
+    done, total = st["achievements"]
+
+    lines = [
+        f"{h1('NeuroSync Game')} ✧ LVL {lvl}/{MAX_LEVEL}",
+        "",
+        h2("Состояние"),
+        row("XP", xp_val),
+        row("HP", hp_val),
+        row("Momentum", mom_val),
+        "",
+        h2("Сегодня"),
+        row("Фокус", f"{hours}h {minutes:02d}m"),
+        row("Сессий", st["today_sessions"]),
+    ]
+    if st["sleep_hours"] is not None:
+        lines.append(row("Сон", f"{st['sleep_hours']:g}h"))
+
+    if st["live"]:
+        h, rem = divmod(int(st["live_seconds"]), 3600)
+        m, s = divmod(rem, 60)
+        state = "идёт" if st["live"] == "studying" else "пауза"
+        lines += ["", f"{h2('Сессия')} ✧ {state}", row("Время", f"{h:02d}:{m:02d}:{s:02d}")]
+
+    lines += ["", row("Достижения", f"{done}/{total}", icon="✧")]
+    return "\n".join(lines)
+
+WEEKDAYS = ["пн", "вт", "ср", "чт", "пт", "сб", "вс"]
+
+def _day_label(day) -> str:
+    mark = "▸" if day == datetime.now().date() else " "
+    return f"{mark}{WEEKDAYS[day.weekday()]} {day:%d.%m}"
+
+def _hm(minutes: float) -> str:
+    h, m = divmod(int(round(minutes)), 60)
+    return f"{h}h {m:02d}m"
+
+def render_work_week(report: list) -> str:
+    peak = max(d["minutes"] for d in report)
+    chart = "\n".join(
+        f"{_day_label(d['day'])} {bar(d['minutes'], peak or 1, 10)} {_hm(d['minutes'])}"
+        for d in report
+    )
+    total = sum(d["minutes"] for d in report)
+    best = max(report, key=lambda d: d["minutes"])
+    lines = [
+        h1("Работа за неделю"), "",
+        f"```\n{chart}\n```", "",
+        row("Всего", _hm(total)),
+        row("В среднем", f"{_hm(total / len(report))} в день"),
+        row("Сессий", sum(d["sessions"] for d in report)),
+    ]
+    if best["minutes"] > 0:
+        lines.append(row("Лучший день", f"{WEEKDAYS[best['day'].weekday()]} {best['day']:%d.%m} · {_hm(best['minutes'])}"))
+    return "\n".join(lines)
+
+def render_sleep_week(report: list) -> str:
+    rows = []
+    for d in report:
+        h = d["sleep_hours"]
+        if h is None:
+            rows.append(f"{_day_label(d['day'])} {'·' * 10} нет данных")
+        else:
+            rows.append(f"{_day_label(d['day'])} {bar(h, 10, 10)} {h:g}h")
+    lines = [h1("Сон за неделю"), "", "```\n" + "\n".join(rows) + "\n```", ""]
+    vals = [d["sleep_hours"] for d in report if d["sleep_hours"] is not None]
+    if vals:
+        lines += [
+            row("В среднем", f"{sum(vals) / len(vals):.1f}h"),
+            row("Минимум", f"{min(vals):g}h"),
+            row("Максимум", f"{max(vals):g}h"),
+            row("Записано дней", f"{len(vals)} из {len(report)}"),
+        ]
+    else:
+        lines.append("⟡ данных о сне за неделю нет")
+    return "\n".join(lines)
+
+def render_week_achievements(items: list) -> str:
+    # обычный текст (без Markdown): в названиях могут быть спецсимволы
+    lines = [f"◇ Достижения за неделю ✧ {len(items)}", ""]
+    for day, name, desc in items:
+        lines.append(f"⟡ {WEEKDAYS[day.weekday()]} {day:%d.%m} · {name}")
+        lines.append(f"▸ {desc}")
+    if not items:
+        lines.append("⟡ новых достижений за неделю нет")
+    return "\n".join(lines)
+
+def game_menu_kb(back: bool = False) -> InlineKeyboardMarkup:
+    rows = []
+    if back:
+        rows.append([InlineKeyboardButton(text="◂ к статусу", callback_data="game_home")])
+    rows += [
+        [InlineKeyboardButton(text="◇ Работа", callback_data="game_work"),
+         InlineKeyboardButton(text="◇ Сон", callback_data="game_sleep")],
+        [InlineKeyboardButton(text="◇ Новые достижения", callback_data="game_week_ach"),
+         InlineKeyboardButton(text="◇ Все достижения", callback_data="game_ach")],
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+async def _edit(callback: CallbackQuery, text: str, markup, parse_mode=None):
+    try:
+        await callback.message.edit_text(text, reply_markup=markup, parse_mode=parse_mode)
+    except TelegramBadRequest:
+        pass  # повторное нажатие: текст не изменился
+
+@dp.callback_query(F.data == "game_home")
+async def game_home(callback: CallbackQuery):
+    await callback.answer()
+    st = await asyncio.to_thread(get_game_status)
+    if st is None:
+        await _edit(callback, f"{h1('NeuroSync Game')}\n⟡ файл состояния игры не найден", game_menu_kb(), "Markdown")
+        return
+    await _edit(callback, render_game(st), game_menu_kb(), "Markdown")
+
+@dp.callback_query(F.data == "game_work")
+async def game_work(callback: CallbackQuery):
+    await callback.answer()
+    report = await asyncio.to_thread(get_week_report)
+    await _edit(callback, render_work_week(report), game_menu_kb(back=True), "Markdown")
+
+@dp.callback_query(F.data == "game_sleep")
+async def game_sleep(callback: CallbackQuery):
+    await callback.answer()
+    report = await asyncio.to_thread(get_week_report)
+    await _edit(callback, render_sleep_week(report), game_menu_kb(back=True), "Markdown")
+
+@dp.callback_query(F.data == "game_week_ach")
+async def game_week_ach(callback: CallbackQuery):
+    await callback.answer()
+    items = await asyncio.to_thread(get_week_achievements)
+    await _edit(callback, render_week_achievements(items), game_menu_kb(back=True))
+
+@dp.callback_query(F.data == "game_ach")
+async def game_achievements(callback: CallbackQuery):
+    await callback.answer()
+    items = get_achievements()
+    unlocked = [(n, d) for n, d, ok in items if ok]
+    lines = [f"◇ Все достижения ✧ {len(unlocked)}/{len(items)}", ""]
+    for name, desc in unlocked:
+        lines.append(f"⟡ {name} · {desc}")
+    if not unlocked:
+        lines.append("⟡ пока нет открытых")
+    await _edit(callback, "\n".join(lines)[:4000], game_menu_kb(back=True))
+
+@dp.message(F.text == "Игра")
+async def game_cmd(message: Message):
+    if not await check_user(message): return
+    st = await asyncio.to_thread(get_game_status)
+    if st is None:
+        await message.answer(f"{h1('NeuroSync Game')}\n⟡ файл состояния игры не найден или повреждён")
+        return
+    await message.answer(render_game(st), reply_markup=game_menu_kb(), parse_mode="Markdown")
+
 # --- ЛОГИКА ФАЙЛОВОГО МЕНЕДЖЕРА (ПРОВОДНИК) ---
 
 async def send_fm_view(event: Message | CallbackQuery, path: Path, state: FSMContext):
@@ -300,6 +474,9 @@ async def send_fm_view(event: Message | CallbackQuery, path: Path, state: FSMCon
         else:
             await event.answer("Отказано в доступе", show_alert=True)
         return
+
+    # Скрытые папки и файлы (имя начинается с точки) в проводнике не показываем
+    items = [f for f in items if not f.name.startswith(".")]
 
     folders = sorted([f for f in items if f.is_dir()], key=lambda x: x.name.lower())
     files = sorted([f for f in items if f.is_file()], key=lambda x: x.name.lower())
